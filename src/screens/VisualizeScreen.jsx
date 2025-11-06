@@ -1,6 +1,10 @@
 import React, { useRef, useEffect, useState } from "react";
-import { useLocation } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import * as d3 from "d3";
+import * as YAML from "js-yaml";
+import Papa from "papaparse";
+import { js2xml, xml2js } from "xml-js";
+import Minimap from "../components/Minimap";
 
 const WIDTH = 3500;
 const HEIGHT = 2500;
@@ -75,8 +79,12 @@ const THEMES = {
 const VisualizeScreen = () => {
   const svgRef = useRef();
   const gRef = useRef();
+  const zoomBehaviorRef = useRef();
+  const zoomTransformRef = useRef(d3.zoomIdentity);
   const zoomInitialized = useRef(false);
+  const [zoomTick, setZoomTick] = useState(0);
   const { state } = useLocation();
+  const navigate = useNavigate();
   const [jsonData, setJsonData] = useState(state?.jsonData);
 
   const [theme, setTheme] = useState("dark");
@@ -96,6 +104,11 @@ const VisualizeScreen = () => {
   const [copied, setCopied] = useState(false);
   const [showAnalyticsPanel, setShowAnalyticsPanel] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showMinimap, setShowMinimap] = useState(true);
+
+  // Export Image
+  const [showExportPanel, setShowExportPanel] = useState(false);
+  const [exportMsg, setExportMsg] = useState("");
 
   // Search & Replace
   const [findValue, setFindValue] = useState("");
@@ -115,6 +128,234 @@ const VisualizeScreen = () => {
     typeCounts: {}
   });
 
+  // ---- FORMAT CONVERTER FEATURE ----
+  const [showFormatConverter, setShowFormatConverter] = useState(false);
+  const [selectedFormat, setSelectedFormat] = useState("json");
+  const [convertedData, setConvertedData] = useState("");
+  const [convertMsg, setConvertMsg] = useState("");
+  const [formatCopied, setFormatCopied] = useState(false);
+
+  const formatConverters = {
+    toYAML: (data) => YAML.dump(data, { indent: 2, lineWidth: -1 }),
+    toXML: (data) => js2xml({ root: data }, { compact: false, spaces: 2 }),
+    toCSV: (data) => {
+      const flattenedData = flattenForCSV(data);
+      return Papa.unparse(flattenedData);
+    },
+    toJSON: (data) => JSON.stringify(data, null, 2),
+    fromYAML: (yamlStr) => YAML.load(yamlStr),
+    fromXML: (xmlStr) => xml2js(xmlStr, { compact: true }).root,
+    fromCSV: (csvStr) => {
+      const parsed = Papa.parse(csvStr, { header: true });
+      return parsed.data.filter(row => Object.values(row).some(v => v));
+    },
+    fromJSON: (jsonStr) => JSON.parse(jsonStr)
+  };
+
+  const flattenForCSV = (data, prefix = "") => {
+    if (!Array.isArray(data)) data = [data];
+    const result = [];
+    const flattenObject = (obj, pre = "") => {
+      const flat = {};
+      for (const key in obj) {
+        if (obj.hasOwnProperty(key)) {
+          const value = obj[key];
+          const newKey = pre ? `${pre}_${key}` : key;
+          if (value === null || value === undefined) {
+            flat[newKey] = "";
+          } else if (typeof value === "object" && !Array.isArray(value)) {
+            Object.assign(flat, flattenObject(value, newKey));
+          } else if (Array.isArray(value)) {
+            flat[newKey] = JSON.stringify(value);
+          } else {
+            flat[newKey] = value;
+          }
+        }
+      }
+      return flat;
+    };
+    data.forEach(item => {
+      if (typeof item === "object" && item !== null) {
+        result.push(flattenObject(item));
+      } else {
+        result.push({ value: item });
+      }
+    });
+    return result;
+  };
+
+  const handleFormatConversion = (targetFormat) => {
+    try {
+      setConvertMsg("");
+      let output;
+      if (targetFormat === "json") output = formatConverters.toJSON(jsonData);
+      else if (targetFormat === "yaml") output = formatConverters.toYAML(jsonData);
+      else if (targetFormat === "xml") output = formatConverters.toXML(jsonData);
+      else if (targetFormat === "csv") output = formatConverters.toCSV(jsonData);
+      setConvertedData(output);
+      setSelectedFormat(targetFormat);
+      setFormatCopied(false);
+      setConvertMsg(`Successfully converted to ${targetFormat.toUpperCase()}`);
+    } catch (e) {
+      setConvertMsg(`Error: ${e.message}`);
+      setConvertedData("");
+    }
+  };
+
+  const handleFormatImport = (inputValue, fromFormat) => {
+    try {
+      setConvertMsg("");
+      let parsedData;
+      if (fromFormat === "json") parsedData = formatConverters.fromJSON(inputValue);
+      else if (fromFormat === "yaml") parsedData = formatConverters.fromYAML(inputValue);
+      else if (fromFormat === "xml") parsedData = formatConverters.fromXML(inputValue);
+      else if (fromFormat === "csv") parsedData = formatConverters.fromCSV(inputValue);
+      setJsonData(parsedData);
+      setConvertMsg(`Successfully imported from ${fromFormat.toUpperCase()}`);
+    } catch (e) {
+      setConvertMsg(`Import error: ${e.message}`);
+    }
+  };
+
+  const handleCopyFormat = () => {
+    if (convertedData) {
+      navigator.clipboard.writeText(convertedData);
+      setFormatCopied(true);
+      setTimeout(() => setFormatCopied(false), 1200);
+    }
+  };
+  const handleDownloadFormat = () => {
+    if (!convertedData) return;
+    const element = document.createElement("a");
+    const file = new Blob([convertedData], { type: "text/plain" });
+    element.href = URL.createObjectURL(file);
+    element.download = `data.${selectedFormat}`;
+    document.body.appendChild(element);
+    element.click();
+    document.body.removeChild(element);
+  };
+
+  // ---- END FORMAT CONVERTER FEATURE ----
+
+  // ---- EXPORT IMAGE FEATURE ----
+  const handleExportImage = async (format) => {
+    try {
+      setExportMsg("Generating image...");
+      const svgElement = svgRef.current;
+      const gElement = gRef.current;
+      
+      if (!svgElement || !gElement) {
+        setExportMsg("Error: SVG not found");
+        return;
+      }
+
+      // Get the bounding box from the original g element (not cloned)
+      let bbox;
+      try {
+        bbox = gElement.getBBox();
+      } catch (err) {
+        setExportMsg("Error: Unable to calculate bounds");
+        console.warn("BBox calculation failed:", err);
+        return;
+      }
+
+      if (!bbox || bbox.width === 0 || bbox.height === 0) {
+        setExportMsg("Error: No content to export");
+        return;
+      }
+
+      // Clone the SVG
+      const clonedSvg = svgElement.cloneNode(true);
+      
+      // Remove any existing transform on the cloned g element to get clean export
+      const clonedG = clonedSvg.querySelector("g");
+      if (clonedG) {
+        clonedG.removeAttribute("transform");
+      }
+
+      const padding = 40;
+      const width = bbox.width + padding * 2;
+      const height = bbox.height + padding * 2;
+
+      // Set proper viewBox for the cloned SVG
+      clonedSvg.setAttribute("viewBox", `${bbox.x - padding} ${bbox.y - padding} ${width} ${height}`);
+      clonedSvg.setAttribute("width", width);
+      clonedSvg.setAttribute("height", height);
+      
+      // Ensure proper namespace
+      clonedSvg.setAttribute("xmlns", "http://www.w3.org/2000/svg");
+
+      if (format === "svg") {
+        // Export as SVG directly
+        const serializer = new XMLSerializer();
+        const svgString = serializer.serializeToString(clonedSvg);
+        const blob = new Blob([svgString], { type: "image/svg+xml" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `jsonglance-visualization.svg`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+        setExportMsg(`Successfully exported as SVG`);
+        setTimeout(() => setExportMsg(""), 3000);
+      } else {
+        // Export as raster format (PNG/JPG/GIF)
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        canvas.width = width;
+        canvas.height = height;
+
+        // For JPG, fill white background
+        if (format === "jpg") {
+          ctx.fillStyle = "#FFFFFF";
+          ctx.fillRect(0, 0, width, height);
+        }
+
+        const serializer = new XMLSerializer();
+        const svgString = serializer.serializeToString(clonedSvg);
+        const img = new Image();
+        const svgBlob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+        const url = URL.createObjectURL(svgBlob);
+
+        img.onload = () => {
+          ctx.drawImage(img, 0, 0);
+          URL.revokeObjectURL(url);
+
+          canvas.toBlob((blob) => {
+            if (blob) {
+              const downloadUrl = URL.createObjectURL(blob);
+              const link = document.createElement("a");
+              link.href = downloadUrl;
+              link.download = `jsonglance-visualization.${format}`;
+              document.body.appendChild(link);
+              link.click();
+              document.body.removeChild(link);
+              URL.revokeObjectURL(downloadUrl);
+              setExportMsg(`Successfully exported as ${format.toUpperCase()}`);
+              setTimeout(() => setExportMsg(""), 3000);
+            } else {
+              setExportMsg("Error creating image file");
+            }
+          }, `image/${format === "jpg" ? "jpeg" : format}`);
+        };
+
+        img.onerror = () => {
+          URL.revokeObjectURL(url);
+          setExportMsg("Error rendering image");
+        };
+
+        img.src = url;
+      }
+    } catch (error) {
+      setExportMsg(`Export error: ${error.message}`);
+      setTimeout(() => setExportMsg(""), 3000);
+    }
+  };
+  // ---- END EXPORT IMAGE FEATURE ----
+
+  // continue on next message ...
   useEffect(() => {
     function getAnalytics(data, path = [], depth = 0, meta = null) {
       if (!meta) {
@@ -325,7 +566,8 @@ const VisualizeScreen = () => {
       .attr("dominant-baseline", "middle")
       .text(d => {
         const name = String(d.data.name || "");
-        if (d.data.isCollapsible && d.data.isCollapsed) return (name.length > 10 ? name.substring(0, 8) + "..." : name) + " [+]";
+        if (d.data.isCollapsible && d.data.isCollapsed)
+          return (name.length > 10 ? name.substring(0, 8) + "..." : name) + " [+]";
         return name.length > 15 ? name.substring(0, 12) + "..." : name;
       })
       .append("title")
@@ -368,20 +610,24 @@ const VisualizeScreen = () => {
     const svg = d3.select(svgRef.current);
     svg.selectAll("rect.bg").remove();
     svg.insert("rect", ":first-child")
-       .attr("class", "bg")
-       .attr("width", WIDTH)
-       .attr("height", HEIGHT)
-       .attr("fill", colors.background);
+      .attr("class", "bg")
+      .attr("width", WIDTH)
+      .attr("height", HEIGHT)
+      .attr("fill", colors.background);
 
-    svg.call(
-      d3.zoom()
-        .scaleExtent([0.3, 2.5])
-        .on("zoom", (event) => {
-          g.attr("transform", event.transform);
-        })
-    );
+    // initialize a single zoom behavior and keep references so Minimap can interact
+    const zoomBehavior = d3.zoom().scaleExtent([0.3, 2.5]).on("zoom", (event) => {
+      g.attr("transform", event.transform);
+      zoomTransformRef.current = event.transform;
+      // small tick to let React children (Minimap) re-run effects
+      setZoomTick((t) => t + 1);
+    });
+    zoomBehaviorRef.current = zoomBehavior;
+    svg.call(zoomBehavior);
     if (!zoomInitialized.current) {
-      svg.call(d3.zoom().transform, d3.zoomIdentity.translate(500, 250).scale(0.8));
+      // set a sensible initial transform
+      d3.select(svgRef.current).call(zoomBehavior.transform, d3.zoomIdentity.translate(500, 250).scale(0.8));
+      zoomTransformRef.current = d3.zoomTransform(svgRef.current);
       zoomInitialized.current = true;
     }
 
@@ -421,7 +667,6 @@ const VisualizeScreen = () => {
       setCopied(false);
     });
   }, [jsonData, expandedNodes, excludedFields, highlightedNodePathChain, selectedNodePath, colors]);
-
   function handleSearch(e) {
     e.preventDefault();
     if (!searchField.trim()) {
@@ -535,7 +780,6 @@ const VisualizeScreen = () => {
     setCopyJsonState("Copied!");
     setTimeout(() => setCopyJsonState("Copy JSON"), 1000);
   }
-
   return (
     <div
       style={{
@@ -563,19 +807,140 @@ const VisualizeScreen = () => {
           boxSizing: "border-box"
         }}
       >
-        {/* COPY JSON and THEME ICON SWITCH */}
-        <div style={{ width: "100%", display: "flex", alignItems: "center", gap: 12, marginBottom: 12 }}>
+        {/* Back Button */}
+        <button
+          onClick={() => navigate("/")}
+          style={{
+            width: "100%",
+            padding: "10px 12px",
+            marginBottom: 16,
+            background: colors.analyticsBg,
+            color: colors.primary,
+            border: `2px solid ${colors.primary}`,
+            borderRadius: "8px",
+            fontFamily: "monospace",
+            fontSize: 13,
+            fontWeight: "bold",
+            cursor: "pointer",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            gap: 8,
+            transition: "all 0.2s"
+          }}
+          onMouseOver={(e) => {
+            e.currentTarget.style.background = colors.primary;
+            e.currentTarget.style.color = colors.background;
+          }}
+          onMouseOut={(e) => {
+            e.currentTarget.style.background = colors.analyticsBg;
+            e.currentTarget.style.color = colors.primary;
+          }}
+          title="Go back to Home"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+            <path d="M19 12H5M12 19l-7-7 7-7"/>
+          </svg>
+          Back to Home
+        </button>
+
+        {/* Header with title and controls */}
+        <div
+          style={{
+            fontFamily: "monospace",
+            fontSize: 18,
+            color: colors.primary,
+            marginBottom: 12,
+            paddingBottom: 8,
+            borderBottom: `1px solid ${colors.sidebarBorder}`,
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 8
+          }}
+        >
+          <span style={{ fontWeight: "bold", flexShrink: 0 }}>JSON Visualizer</span>
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <button
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+              style={{
+                width: 32,
+                height: 32,
+                background: colors.primary,
+                border: "none",
+                borderRadius: "50%",
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "center",
+                cursor: "pointer",
+                transition: "background 0.2s",
+                boxShadow: theme === "light" ? "0 2px 8px #aaa" : undefined,
+                flexShrink: 0
+              }}
+              title={theme === "dark" ? "Light mode" : "Dark mode"}
+            >
+              {theme === "dark" ? (
+                <svg width="18" height="18" fill="none" viewBox="0 0 24 24">
+                  <circle cx="12" cy="12" r="5.2" fill="#f5e206" stroke="#975809" strokeWidth="1.4"/>
+                  <g stroke="#f5e206" strokeWidth="2">
+                    <line x1="12" y1="2" x2="12" y2="5"/>
+                    <line x1="12" y1="19" x2="12" y2="22"/>
+                    <line x1="2" y1="12" x2="5" y2="12"/>
+                    <line x1="19" y1="12" x2="22" y2="12"/>
+                    <line x1="4.6" y1="4.6" x2="6.8" y2="6.8"/>
+                    <line x1="19.4" y1="19.4" x2="17.2" y2="17.2"/>
+                    <line x1="4.6" y1="19.4" x2="6.8" y2="17.2"/>
+                    <line x1="19.4" y1="4.6" x2="17.2" y2="6.8"/>
+                  </g>
+                </svg>
+              ) : (
+                <svg width="18" height="18" fill="none" viewBox="0 0 24 24">
+                  <path
+                    d="M21 13.5
+                      A9 9 0 1 1 13.5 3
+                      A7 7 0 1 0 21 13.5Z"
+                    fill="#f5e206"
+                    stroke="#975809" strokeWidth="1.4"
+                  />
+                </svg>
+              )}
+            </button>
+            <button
+              onClick={() => setShowMinimap(s => !s)}
+              style={{
+                padding: "4px 8px",
+                background: showMinimap ? colors.primary : colors.sidebarBorder,
+                color: showMinimap ? colors.background : colors.text,
+                border: "none",
+                borderRadius: "5px",
+                fontWeight: "bold",
+                cursor: "pointer",
+                fontFamily: "monospace",
+                fontSize: 10,
+                flexShrink: 0
+              }}
+              title={showMinimap ? "Hide Minimap" : "Show Minimap"}
+            >
+              Map
+            </button>
+          </div>
+        </div>
+
+        {/* COPY JSON button row */}
+        <div style={{ width: "100%", marginBottom: 12 }}>
           <button
             onClick={handleCopyJson}
             style={{
+              width: "100%",
               fontFamily: "monospace",
               background: colors.secondary,
               color: colors.background,
               border: "none",
               borderRadius: "7px",
               fontWeight: "bold",
-              padding: "6px 18px",
-              fontSize: 13,
+              padding: "8px 12px",
+              fontSize: 12,
               cursor: "pointer",
               transition: "background 0.15s"
             }}
@@ -583,66 +948,295 @@ const VisualizeScreen = () => {
           >
             {copyJsonState}
           </button>
+        </div>
+
+        {/* ----- FORMAT CONVERTER PANEL ------ */}
+        <div style={{ width: "100%", marginBottom: 12 }}>
           <button
-            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            onClick={() => setShowFormatConverter(!showFormatConverter)}
             style={{
-              width: 40,
-              height: 40,
-              background: colors.primary,
+              width: "100%",
+              padding: "8px 10px",
+              background: colors.link,
+              color: colors.background,
               border: "none",
-              borderRadius: "50%",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
+              borderRadius: "6px",
+              fontFamily: "monospace",
+              fontSize: 12,
               cursor: "pointer",
-              transition: "background 0.2s",
-              boxShadow: theme === "light" ? "0 2px 8px #aaa" : undefined
+              fontWeight: "bold",
+              marginBottom: 8,
+              transition: "background 0.2s"
             }}
-            title={theme === "dark" ? "Light mode" : "Dark mode"}
           >
-            {theme === "dark" ? (
-              <svg width="24" height="24" fill="none" viewBox="0 0 24 24">
-                <circle cx="12" cy="12" r="5.2" fill="#f5e206" stroke="#975809" strokeWidth="1.4"/>
-                <g stroke="#f5e206" strokeWidth="2">
-                  <line x1="12" y1="2" x2="12" y2="5"/>
-                  <line x1="12" y1="19" x2="12" y2="22"/>
-                  <line x1="2" y1="12" x2="5" y2="12"/>
-                  <line x1="19" y1="12" x2="22" y2="12"/>
-                  <line x1="4.6" y1="4.6" x2="6.8" y2="6.8"/>
-                  <line x1="19.4" y1="19.4" x2="17.2" y2="17.2"/>
-                  <line x1="4.6" y1="19.4" x2="6.8" y2="17.2"/>
-                  <line x1="19.4" y1="4.6" x2="17.2" y2="6.8"/>
-                </g>
-              </svg>
-            ) : (
-              <svg width="24" height="24" fill="none" viewBox="0 0 24 24">
-                <path
-                  d="M21 13.5
-                    A9 9 0 1 1 13.5 3
-                    A7 7 0 1 0 21 13.5Z"
-                  fill="#f5e206"
-                  stroke="#975809" strokeWidth="1.4"
-                />
-              </svg>
-            )}
+            {showFormatConverter ? "Hide" : "Show"} Format Converter
           </button>
+          {showFormatConverter && (
+            <div style={{
+              background: colors.analyticsBg,
+              border: `2px solid ${colors.link}`,
+              borderRadius: "6px",
+              padding: "10px",
+              marginBottom: 12
+            }}>
+              <div style={{
+                fontWeight: "bold",
+                marginBottom: 8,
+                color: colors.analyticsLabel,
+                fontSize: 12
+              }}>
+                Convert To:
+              </div>
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "6px",
+                marginBottom: 10
+              }}>
+                {["json", "yaml", "xml", "csv"].map(format => (
+                  <button
+                    key={format}
+                    onClick={() => handleFormatConversion(format)}
+                    style={{
+                      padding: "6px 8px",
+                      background: selectedFormat === format ? colors.primary : colors.sidebarBorder,
+                      color: selectedFormat === format ? colors.background : colors.text,
+                      border: `1px solid ${colors.primary}`,
+                      borderRadius: "4px",
+                      fontFamily: "monospace",
+                      fontSize: 11,
+                      cursor: "pointer",
+                      fontWeight: "bold",
+                      transition: "all 0.2s",
+                      textTransform: "uppercase"
+                    }}
+                  >
+                    {format}
+                  </button>
+                ))}
+              </div>
+              {convertedData && (
+                <div style={{
+                  background: colors.sidebar,
+                  border: `1px solid ${colors.sidebarBorder}`,
+                  borderRadius: "4px",
+                  padding: "8px",
+                  maxHeight: "150px",
+                  overflowY: "auto",
+                  marginBottom: 8,
+                  fontSize: 10,
+                  fontFamily: "monospace",
+                  color: colors.analyticsText,
+                  wordBreak: "break-all",
+                  lineHeight: "1.3"
+                }}>
+                  {convertedData.substring(0, 500)}
+                  {convertedData.length > 500 && "..."}
+                </div>
+              )}
+              <div style={{
+                display: "flex",
+                gap: "6px",
+                marginBottom: 8
+              }}>
+                <button
+                  onClick={handleCopyFormat}
+                  disabled={!convertedData}
+                  style={{
+                    flex: 1,
+                    padding: "6px",
+                    background: formatCopied ? colors.copyActive : colors.copyDefault,
+                    color: colors.background,
+                    border: "none",
+                    borderRadius: "4px",
+                    fontFamily: "monospace",
+                    fontSize: 10,
+                    cursor: convertedData ? "pointer" : "not-allowed",
+                    fontWeight: "bold",
+                    opacity: convertedData ? 1 : 0.5
+                  }}
+                >
+                  {formatCopied ? "Copied!" : "Copy"}
+                </button>
+                <button
+                  onClick={handleDownloadFormat}
+                  disabled={!convertedData}
+                  style={{
+                    flex: 1,
+                    padding: "6px",
+                    background: colors.secondary,
+                    color: colors.background,
+                    border: "none",
+                    borderRadius: "4px",
+                    fontFamily: "monospace",
+                    fontSize: 10,
+                    cursor: convertedData ? "pointer" : "not-allowed",
+                    fontWeight: "bold",
+                    opacity: convertedData ? 1 : 0.5
+                  }}
+                >
+                  Download
+                </button>
+              </div>
+              <div style={{
+                fontSize: 11,
+                color: convertMsg.includes("Error") ? colors.accent : colors.analyticsKey,
+                padding: "6px",
+                background: colors.sidebar,
+                borderRadius: "4px",
+                minHeight: "20px",
+                fontFamily: "monospace"
+              }}>
+                {convertMsg}
+              </div>
+              <div style={{
+                marginTop: 10,
+                paddingTop: 10,
+                borderTop: `1px solid ${colors.sidebarBorder}`
+              }}>
+                <div style={{
+                  fontWeight: "bold",
+                  marginBottom: 8,
+                  color: colors.analyticsLabel,
+                  fontSize: 12
+                }}>
+                  Import From:
+                </div>
+                <textarea
+                  placeholder="Paste JSON, YAML, XML, or CSV here..."
+                  style={{
+                    width: "100%",
+                    height: "80px",
+                    padding: "6px",
+                    borderRadius: "4px",
+                    border: `1px solid ${colors.sidebarBorder}`,
+                    background: colors.sidebar,
+                    color: colors.text,
+                    fontFamily: "monospace",
+                    fontSize: 10,
+                    resize: "none",
+                    boxSizing: "border-box",
+                    marginBottom: 6
+                  }}
+                  id="format-input"
+                />
+                <div style={{
+                  display: "grid",
+                  gridTemplateColumns: "1fr 1fr",
+                  gap: "6px"
+                }}>
+                  {["json", "yaml", "xml", "csv"].map(format => (
+                    <button
+                      key={`import-${format}`}
+                      onClick={() => {
+                        const textarea = document.getElementById("format-input");
+                        handleFormatImport(textarea.value, format);
+                      }}
+                      style={{
+                        padding: "6px 8px",
+                        background: colors.accent,
+                        color: colors.background,
+                        border: "none",
+                        borderRadius: "4px",
+                        fontFamily: "monospace",
+                        fontSize: 10,
+                        cursor: "pointer",
+                        fontWeight: "bold",
+                        textTransform: "uppercase"
+                      }}
+                    >
+                      Import {format}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
-        <div
-          style={{
-            fontFamily: "monospace",
-            fontSize: 18,
-            color: colors.primary,
-            marginBottom: 14,
-            paddingBottom: 8,
-            borderBottom: `1px solid ${colors.sidebarBorder}`,
-            width: "100%",
-            whiteSpace: "nowrap",
-            overflow: "hidden",
-            textOverflow: "ellipsis"
-          }}
-        >
-          JSON Visualizer
+        {/* ----- END FORMAT CONVERTER ----- */}
+
+        {/* ----- EXPORT IMAGE PANEL ----- */}
+        <div style={{ width: "100%", marginBottom: 12 }}>
+          <button
+            onClick={() => setShowExportPanel(!showExportPanel)}
+            style={{
+              width: "100%",
+              padding: "8px 10px",
+              background: colors.secondary,
+              color: colors.background,
+              border: "none",
+              borderRadius: "6px",
+              fontFamily: "monospace",
+              fontSize: 12,
+              cursor: "pointer",
+              fontWeight: "bold",
+              marginBottom: 8,
+              transition: "background 0.2s"
+            }}
+          >
+            {showExportPanel ? "Hide" : "Show"} Export Image
+          </button>
+          {showExportPanel && (
+            <div style={{
+              background: colors.analyticsBg,
+              border: `2px solid ${colors.secondary}`,
+              borderRadius: "6px",
+              padding: "10px",
+              marginBottom: 12
+            }}>
+              <div style={{
+                fontWeight: "bold",
+                marginBottom: 8,
+                color: colors.analyticsLabel,
+                fontSize: 12
+              }}>
+                Export as:
+              </div>
+              <div style={{
+                display: "grid",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "6px",
+                marginBottom: 10
+              }}>
+                {["png", "jpg", "svg", "gif"].map(format => (
+                  <button
+                    key={format}
+                    onClick={() => handleExportImage(format)}
+                    style={{
+                      padding: "8px 10px",
+                      background: colors.primary,
+                      color: colors.background,
+                      border: "none",
+                      borderRadius: "4px",
+                      fontFamily: "monospace",
+                      fontSize: 11,
+                      cursor: "pointer",
+                      fontWeight: "bold",
+                      transition: "all 0.2s",
+                      textTransform: "uppercase"
+                    }}
+                  >
+                    {format}
+                  </button>
+                ))}
+              </div>
+              {exportMsg && (
+                <div style={{
+                  fontSize: 11,
+                  color: exportMsg.includes("Error") ? colors.accent : colors.analyticsKey,
+                  padding: "6px",
+                  background: colors.sidebar,
+                  borderRadius: "4px",
+                  minHeight: "20px",
+                  fontFamily: "monospace"
+                }}>
+                  {exportMsg}
+                </div>
+              )}
+            </div>
+          )}
         </div>
+        {/* ----- END EXPORT IMAGE ----- */}
 
         {/* --- SEARCH --- */}
         <div
@@ -712,6 +1306,7 @@ const VisualizeScreen = () => {
             {searchMsg}
           </div>
         </div>
+
         {/* --- FILTERS --- */}
         <div style={{ width: "100%", marginBottom: 12 }}>
           <button
@@ -835,6 +1430,7 @@ const VisualizeScreen = () => {
             </div>
           )}
         </div>
+
         {/* --- PATH AND SELECTED VALUE --- */}
         <div
           style={{
@@ -909,6 +1505,7 @@ const VisualizeScreen = () => {
             : <>Path: <span style={{color: colors.secondary}}>None</span></>
           }
         </div>
+
         {/* --- ANALYTICS --- */}
         <div style={{ width: '100%', marginTop: 8, marginBottom: 8 }}>
           <button
@@ -974,6 +1571,7 @@ const VisualizeScreen = () => {
             </div>
           )}
         </div>
+
         {/* --- ADVANCED FEATURES --- */}
         <div style={{ width: '100%', marginTop: 3 }}>
           <button
@@ -1069,9 +1667,25 @@ const VisualizeScreen = () => {
         style={{
           flex: 1,
           overflow: "auto",
-          maxHeight: "92vh"
+          maxHeight: "92vh",
+          position: "relative"
         }}
       >
+        {showMinimap && (
+          <div style={{ position: "absolute", right: 14, top: 14, zIndex: 40 }}>
+            <Minimap
+              targetSvgRef={svgRef}
+              targetGRef={gRef}
+              zoomBehaviorRef={zoomBehaviorRef}
+              zoomTransformRef={zoomTransformRef}
+              zoomTick={zoomTick}
+              width={220}
+              height={140}
+              padding={6}
+              themeColors={colors}
+            />
+          </div>
+        )}
         <svg
           ref={svgRef}
           width={WIDTH}
