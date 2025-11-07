@@ -214,7 +214,7 @@ This project is licensed under the MIT License — see [LICENSE](LICENSE) for de
 
 - **Repository:** [github.com/Hunter69240/JsonGlance](https://github.com/Hunter69240/JsonGlance)
 - **Issues:** [Report bugs or request features](https://github.com/Hunter69240/JsonGlance/issues)
-- **Discussions:** [Join the conversation](https://github.com/Hunter69240/JsonGlance/discussions)
+
 - **Developer:** [@Hunter69240](https://github.com/Hunter69240)
 
 ---
