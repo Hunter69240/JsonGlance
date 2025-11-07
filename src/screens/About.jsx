@@ -6,7 +6,7 @@ export default function About() {
   const navigate = useNavigate();
   
   // Feedback form state
-  const [feedbackType, setFeedbackType] = useState("feedback");
+  const [feedbackType, setFeedbackType] = useState("General Feedback");
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
@@ -15,63 +15,39 @@ export default function About() {
 
   const handleSubmit = async (e) => {
     e.preventDefault();
-    
-    // Validate form
-    if (!name.trim() || !email.trim() || !message.trim()) {
-      setSubmitStatus("❌ Please fill in all fields.");
-      setTimeout(() => setSubmitStatus(""), 3000);
-      return;
-    }
-
-    // Email validation
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(email)) {
-      setSubmitStatus("❌ Please enter a valid email address.");
-      setTimeout(() => setSubmitStatus(""), 3000);
-      return;
-    }
-
     setIsSubmitting(true);
     setSubmitStatus("📤 Sending...");
 
-    // Google Forms Configuration
-    // REPLACE THIS with your actual Google Form URL after following the setup guide
-    const GOOGLE_FORM_ACTION_URL = "YOUR_GOOGLE_FORM_URL_HERE";
-    
-    // REPLACE these with your actual Google Form entry IDs
-    const ENTRY_NAME = "entry.123456789";      // Replace with your Name field entry ID
-    const ENTRY_EMAIL = "entry.987654321";     // Replace with your Email field entry ID
-    const ENTRY_TYPE = "entry.555555555";      // Replace with your Type field entry ID
-    const ENTRY_MESSAGE = "entry.111111111";   // Replace with your Message field entry ID
-
-    // Create form data
-    const formData = new FormData();
-    formData.append(ENTRY_NAME, name);
-    formData.append(ENTRY_EMAIL, email);
-    formData.append(ENTRY_TYPE, feedbackType);
-    formData.append(ENTRY_MESSAGE, message);
-
     try {
-      // Submit to Google Forms
-      await fetch(GOOGLE_FORM_ACTION_URL, {
-        method: 'POST',
-        body: formData,
-        mode: 'no-cors' // Required for Google Forms
+      const response = await fetch(import.meta.env.VITE_FORMSPREE_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          name: name,
+          email: email,
+          feedbackType: feedbackType,
+          message: message
+        })
       });
-      
-      // Note: no-cors means we can't read the response, but the form will still submit
-      setSubmitStatus("✓ Thank you! Your feedback has been submitted successfully.");
-      
-      // Clear form
-      setTimeout(() => {
-        setName("");
-        setEmail("");
-        setMessage("");
-        setFeedbackType("feedback");
-        setSubmitStatus("");
+
+      if (response.ok) {
+        setSubmitStatus("✓ Thank you! Your feedback has been submitted successfully.");
+        // Clear form
+        setTimeout(() => {
+          setName("");
+          setEmail("");
+          setMessage("");
+          setFeedbackType("General Feedback");
+          setSubmitStatus("");
+          setIsSubmitting(false);
+        }, 3000);
+      } else {
+        setSubmitStatus("❌ Failed to send feedback. Please try again or contact us via GitHub.");
         setIsSubmitting(false);
-      }, 3000);
-      
+        setTimeout(() => setSubmitStatus(""), 5000);
+      }
     } catch (error) {
       console.error("Form submission error:", error);
       setSubmitStatus("❌ Failed to send feedback. Please try again or contact us via GitHub.");
@@ -146,7 +122,7 @@ export default function About() {
        <p>
           We welcome your feedback and contributions—help us improve JsonGlance for everyone!
           For documentation, support, or to share suggestions, reach us at{' '}
-          <a href="https://github.com/Hunter69240" target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-500">
+          <a href={import.meta.env.VITE_GITHUB_URL} target="_blank" rel="noopener noreferrer" className="hover:underline text-blue-500">
            GitHub
           </a>
           .
@@ -186,10 +162,10 @@ export default function About() {
                   cursor: "pointer"
                 }}
               >
-                <option value="feedback">General Feedback</option>
-                <option value="bug">Bug Report</option>
-                <option value="feature">Feature Request</option>
-                <option value="question">Question</option>
+                <option value="General Feedback">General Feedback</option>
+                <option value="Bug Report">Bug Report</option>
+                <option value="Feature Request">Feature Request</option>
+                <option value="Question">Question</option>
               </select>
             </div>
 
@@ -200,6 +176,7 @@ export default function About() {
               </label>
               <input
                 type="text"
+                name="name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 placeholder="Your name"
@@ -224,6 +201,7 @@ export default function About() {
               </label>
               <input
                 type="email"
+                name="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 placeholder="your.email@example.com"
@@ -247,6 +225,7 @@ export default function About() {
                 Message *
               </label>
               <textarea
+                name="message"
                 value={message}
                 onChange={(e) => setMessage(e.target.value)}
                 placeholder="Tell us what you think, what features you'd like to see, or any issues you've encountered..."
