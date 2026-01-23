@@ -34,7 +34,7 @@ A powerful, interactive JSON visualization and manipulation tool built with Reac
 ## 🚀 Live Demo
 
 **[Visit JSONGlance →](#)**  
-_Add your deployed project URL above_
+
 
 ---
 
